@@ -1,0 +1,31 @@
+[package]
+name = "net-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.windows]
+version = "0.48"
+features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_IO",
+    "Win32_Networking_HttpServer",
+    "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem"
+]
+
+[dependencies]
+reqwest = { version = "0.11.26", features = ["blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8.5"
+clap = { version = "4.5.3", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3.30"
+num_cpus = "1.16.0"
+winapi = "0.3.9"
+
+
+
