@@ -17,15 +17,9 @@ features = [
 ]
 
 [dependencies]
-reqwest = { version = "0.11.26", features = ["blocking"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-rand = "0.8.5"
 clap = { version = "4.5.3", features = ["derive"] }
+rand = "0.8.5"
+reqwest = { version = "0.11.26", features = ["blocking"] }
 tokio = { version = "1", features = ["full"] }
-futures = "0.3.30"
-num_cpus = "1.16.0"
 winapi = "0.3.9"
-
-
-
+plotters = "0.3.7"

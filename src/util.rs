@@ -1,18 +1,21 @@
 use rand::{thread_rng, Rng};
-use reqwest::blocking::get;
+use reqwest::Url;
 use std::env;
-use std::fmt::Display;
+use std::hint::black_box;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub struct ServerExe {
     pub(crate) proc: Option<Child>,
-    pub(crate) port: i32,
+    pub(crate) port: u16,
 }
 
 impl ServerExe {
-    pub fn format_req_url<T: Display>(self: &ServerExe, path: T) -> String {
-        format!("http://localhost:{}{}", self.port, path)
+    pub fn format_req_url(self: &ServerExe, path: &str) -> Url {
+        let mut url = Url::parse("http://localhost/").expect("Failed to parse url");
+        url.set_port(Some(self.port)).expect("Failed to set port");
+        url.set_path(&path.to_string());
+        url
     }
 }
 
@@ -21,7 +24,7 @@ impl Drop for ServerExe {
         if let Some(mut proc) = self.proc.take() {
             proc.kill().expect("Failed to kill server");
             // Optionally wait for the process to finish
-            let _ = proc.wait(); 
+            let _ = proc.wait();
         }
     }
 }
@@ -35,8 +38,7 @@ pub fn run_this_exe_as_server() -> ServerExe {
 
     // Spawn the server external process
     let mut c = Command::new(exe_path);
-
-    c.arg("server").arg("-p").arg(port.to_string());
+    c.arg("server").arg(format!("http://localhost:{}/", port));
 
     let proc = c
         .stdout(Stdio::piped())
@@ -50,22 +52,32 @@ pub fn run_this_exe_as_server() -> ServerExe {
     }
 }
 
-pub fn measure_latency<F, T>(f: F) -> Duration
+pub struct LatencyMeasurement {
+    pub latency: Duration,
+}
+
+pub fn measure_latency<F, T>(f: F) -> LatencyMeasurement
 where
     F: Fn() -> T,
 {
     const MIN_ITERATIONS: usize = 10;
-    const MAX_ITERATIONS: usize = 1000; // Maximum number of iterations to prevent infinite loops
-    const STABLE_THRESHOLD: f64 = 0.20; // 20% change considered stable
-    const OUTLIER_THRESHOLD: f64 = 3.0; // 3 standard deviations away considered an outlier
+    const MAX_ITERATIONS: usize = 200; // Maximum number of iterations to prevent infinite loops
+    const STABLE_THRESHOLD: f64 = 1.0; // 100% change considered stable
+    const OUTLIER_THRESHOLD: f64 = 2.0; // standard deviations away considered an outlier
+
+    // warm up    
+    for _ in 0..5 {
+        let _ = f();
+    }
 
     let mut durations = Vec::new();
 
     for i in 0..MAX_ITERATIONS {
         let start = Instant::now();
-        f();
+        let _ = f();
         let duration = start.elapsed();
-        durations.push(duration.as_secs_f64());
+        durations.push(duration.as_secs_f64()); 
+        
 
         if i >= MIN_ITERATIONS {
             // Need at least 3 measurements to calculate mean and std dev
@@ -94,11 +106,19 @@ where
                 });
 
                 if is_stable {
-                    return Duration::from_secs_f64(mean);
+                    break;
                 }
             }
         }
     }
 
-    panic!("Failed to converge after {} iterations", MAX_ITERATIONS);
+    let mean = durations.iter().sum::<f64>() / durations.len() as f64;
+
+    LatencyMeasurement {
+        latency : Duration::from_secs_f64(mean),
+    }
+}
+
+pub fn print_latency(result: &LatencyMeasurement) {
+    println!("Average latency: {:?}", result.latency);
 }

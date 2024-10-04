@@ -228,7 +228,9 @@ static G_HTTP_VERSION: HTTPAPI_VERSION = HTTPAPI_VERSION {
     HttpApiMinorVersion: 0,
 };
 
-pub struct HttpInitializer { running: bool }
+pub struct HttpInitializer {
+    running: bool,
+}
 
 impl HttpInitializer {
     pub fn default() -> HttpInitializer {
@@ -241,7 +243,7 @@ impl HttpInitializer {
         };
         let err = Error::from(HRESULT(ec.try_into().unwrap()));
         assert_eq!(err, Error::OK);
-        Self { running : true }
+        Self { running: true }
     }
 }
 
@@ -395,8 +397,8 @@ impl Response {
         &self.raw
     }
 
-    pub fn add_body_chunk(&mut self, data: String) {
-        self.strings = data;
+    pub fn add_body_chunk(&mut self, data: &str) {
+        self.strings = data.to_string();
 
         let mut chunk = Box::<HTTP_DATA_CHUNK>::default();
         chunk.DataChunkType = HttpDataChunkFromMemory;

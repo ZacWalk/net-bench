@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All Rights Reserved.
 
 use httpsys::{HttpInitializer, Request, RequestQueue, Response, ServerSession, UrlGroup};
+use reqwest::Url;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::broadcast;
 use windows::{
@@ -12,16 +13,8 @@ use windows::{
 
 use crate::httpsys;
 
-async fn handle_request<F>(
-    queue: &RequestQueue,
-    req: &HTTP_REQUEST_V2,
-    url: &str,
-    process_request: F,
-) where
-    F: Fn(&str) -> String,
-{
+async fn return_response(queue: &RequestQueue, req: &HTTP_REQUEST_V2, result_text: &str) {
     let id = req.Base.RequestId;
-    let result = process_request(url);
 
     let mut resp = Response::default();
     resp.raw.Base.StatusCode = 200;
@@ -35,7 +28,7 @@ async fn handle_request<F>(
     resp.raw.Base.Headers.KnownHeaders[HttpHeaderContentType.0 as usize].pRawValue =
         ::windows::core::PCSTR(content_type.as_ptr());
 
-    resp.add_body_chunk(result);
+    resp.add_body_chunk(result_text);
 
     let flags = 0u32; // HTTP_SEND_RESPONSE_FLAG_DISCONNECT;
 
@@ -46,74 +39,103 @@ async fn handle_request<F>(
 }
 
 pub(crate) struct Server {
-    handles: Vec<std::thread::JoinHandle<()>>,
-    request_queue: Arc<RequestQueue>,
-    term_tx: broadcast::Sender<String>,
-    init: HttpInitializer,
-    session: Arc<ServerSession>,
-    group: Arc<UrlGroup>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    request_queue: Option<Arc<RequestQueue>>,
+    kill_tx: Option<broadcast::Sender<String>>,
+    init: Option<HttpInitializer>,
+    session: Option<Arc<ServerSession>>,
+    group: Option<Arc<UrlGroup>>,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if let Some(tx) = &self.kill_tx {
+            tx.send("kill".to_string());
+        }
+
+        if let Some(handle) = self.worker.take() {
+            handle.join().unwrap();
+        }
+
+        drop(self.request_queue.take());
+        drop(self.group.take());
+        drop(self.session.take());
+        drop(self.init.take());
+        drop(self.kill_tx.take());
+    }
 }
 
 impl Server {
-    pub fn new() -> std::io::Result<Self> {
-        let num_cores = num_cpus::get();
+    pub fn new() -> Self {
         let init = HttpInitializer::default();
         let session = Arc::<ServerSession>::default();
         let url_group = Arc::new(UrlGroup::new(&session));
         let request_queue = Arc::new(RequestQueue::new().unwrap());
         request_queue.bind_url_group(&url_group).unwrap();
-        let (term_tx, _) = broadcast::channel::<String>(1);
+        let (kill_tx, _) = broadcast::channel::<String>(1);
 
-        Ok(Server {
-            handles: vec![], // Will be populated later
-            request_queue,
-            term_tx,
-            init,
-            session,
-            group: url_group,
-        })
-    }
-
-    pub fn wait(self) {
-        for handle in self.handles {
-            handle.join().unwrap();
+        Server {
+            worker: None, // Will be populated later
+            request_queue: Some(request_queue),
+            kill_tx: Some(kill_tx),
+            init: Some(init),
+            session: Some(session),
+            group: Some(url_group),
         }
     }
 
-    pub fn kill(self) {
-        self.term_tx.send("kill".to_string());
+    pub fn wait(&mut self) {
+        if let Some(w) = self.worker.take() {
+            w.join().unwrap();
+        }
     }
 
-    pub fn define_handlers(&mut self, url_handlers: Vec<(&str, fn(&str) -> (String, bool))>) {
+    pub fn kill(&self) {
+        if let Some(tx) = &self.kill_tx {
+            tx.send("kill".to_string());
+        }
+    }
+
+    pub fn define_handlers(&mut self, url_handlers: Vec<(&Url, fn(&str) -> (String, bool))>) {
         let mut next_url_id = 1000;
         let mut handlers: HashMap<u64, fn(&str) -> (String, bool)> = HashMap::new();
 
         for (url, handler_fn) in url_handlers {
-            self.group.add_url(HSTRING::from(url), next_url_id).unwrap();
+            if let Some(group) = &self.group {
+                group
+                    .add_url(HSTRING::from(url.as_str()), next_url_id)
+                    .unwrap();
 
-            handlers.insert(next_url_id, handler_fn);
-            next_url_id += 1;
+                handlers.insert(next_url_id, handler_fn);
+                next_url_id += 1;
+            }
         }
 
-        let num_cores = num_cpus::get();
-        let rq = self.request_queue.clone();        
+        let rq = self.request_queue.clone(); // Clone the Option<Arc>
+        let term_tx = self.kill_tx.clone(); // Clone the Option<broadcast::Sender>
 
-        for core_id in 0..num_cores {
-            let rq = rq.clone();            
-            let handlers = handlers.clone(); // Clone the handlers for each thread
-            let term_tx = self.term_tx.clone();
+        // Single background thread
+        let handle = std::thread::spawn(move || {
+            // Check if term_tx and rq are Some before using them
+            let mut kill_channel = term_tx
+                .as_ref()
+                .map(|tx| tx.subscribe())
+                .expect("Could not subscribe to kill channel");
+            let rq = rq.as_ref();
 
-            let handle = std::thread::spawn(move || {
-                let mut kill_channel = term_tx.subscribe();
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async move {
-                    loop {
-                        tokio::select! {
-                            _ = kill_channel.recv() => {
-                                println!("Shutdown core {}.", core_id);
-                                break;
-                            },
-                            _ = async {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                loop {
+                    tokio::select! {
+                        _ = async {
+                            kill_channel.recv().await
+                        } => {
+                            println!("Shutting down server.");
+                            break;
+                        },
+                        _ = async {
+                            // Only try to receive a request if rq is Some
+                            if let Some(rq) = rq {
                                 let mut req = Request::default();
                                 let err = rq
                                     .async_receive_request(
@@ -130,114 +152,30 @@ impl Server {
                                     let url_context = req.raw().Base.UrlContext;
 
                                     if let Some(handler) = handlers.get(&url_context) {
+                                        let (result, is_kill) = handler(&url);
 
-                                        let kill_sender = term_tx.clone();
-
-                                        let h : Box<dyn Fn(&str) -> String> = Box::new(move |url| { 
-                                            let (result, is_kill) = handler(url);
-                                            if is_kill {
-                                                kill_sender.send("kill".to_string()).unwrap(); // Handle potential send error
+                                        if is_kill {
+                                            // Check if term_tx is Some before sending
+                                            if let Some(term_tx) = &term_tx {
+                                                term_tx.send("kill".to_string()).unwrap();
+                                            } else {
+                                                // Handle the case where term_tx is None (optional)
+                                                eprintln!("Error: term_tx is None, cannot send kill signal");
                                             }
-                                            result // Assuming this is the intended return value
-                                        });
+                                        }
 
-                                        handle_request(&rq, &req.raw(), &url, h).await;
+                                        return_response(rq, &req.raw(), &result).await;
                                     } else {
                                         println!("Unknown URL context: {}", url_context);
                                     }
                                 }
-                            } => {}
-                        }
+                            }
+                        } => {}
                     }
-                });
+                }
             });
+        });
 
-            self.handles.push(handle); // Add the handle to the server's handles
-        }
+        self.worker = Some(handle);
     }
 }
-
-// pub(crate) fn start_handling_requests(url_handlers: Vec<(&str, fn(&str) -> String)>) -> std::io::Result<Server> {
-//     let num_cores = num_cpus::get();
-//     let init = HttpInitializer::default();
-//     let session = Arc::<ServerSession>::default();
-//     let url_group = Arc::new(UrlGroup::new(&session));
-//     let mut handlers : HashMap<u64, fn(&str) -> String> = HashMap::new();
-//     let mut next_url_id = 1000;
-
-//     // Add URLs and their handlers dynamically
-//     for (url, handler_fn) in url_handlers {
-//         url_group
-//             .add_url(
-//                 HSTRING::from(url),
-//                 next_url_id,
-//             )
-//             .unwrap();
-
-//             handlers.insert(next_url_id, handler_fn);
-//             next_url_id += 1;
-//     }
-
-//     let request_queue = Arc::new(RequestQueue::new().unwrap());
-//     request_queue.bind_url_group(&url_group).unwrap();
-
-//     let (term_tx, _) = broadcast::channel::<String>(1);
-
-//     let mut handles = vec![];
-//     for core_id in 0..num_cores {
-//         let rq = request_queue.clone();
-//         let mut term_rx = term_tx.subscribe();
-//         let handlers : HashMap<u64, fn(&str) -> String> = HashMap::new();
-
-//         let handle = std::thread::spawn(move || {
-//             let rt = tokio::runtime::Runtime::new().unwrap();
-//             rt.block_on(async move {
-//                 loop {
-//                     tokio::select! {
-//                       _ = term_rx.recv() =>{
-//                         println!("Shutdown core {}.", core_id);
-//                         break;
-//                       }
-//                       _ = async{
-//                         let mut req = Request::default();
-//                         let err = rq
-//                             .async_receive_request(
-//                                 0,
-//                                 HTTP_RECEIVE_HTTP_REQUEST_FLAGS::default(),
-//                                 &mut req,
-//                             )
-//                             .await;
-
-//                             if err.is_err() {
-//                                 println!("request fail: {:?}", err.err());
-//                             }
-//                             else
-//                             {
-//                                 let url = req.url();
-//                                 let url_context = req.raw().Base.UrlContext;
-
-//                                 // Find the matching handler function
-//                                 if let Some(handler) = handlers.get(&url_context) {
-//                                     handle_request(&rq, &req.raw(), &url, handler).await;
-//                                 } else {
-//                                     // Handle unknown URL context (optional)
-//                                     println!("Unknown URL context: {}", url_context);
-//                                 }
-//                             }
-//                       } => {}
-//                     }
-//                 }
-//             });
-//         });
-//         handles.push(handle);
-//     }
-
-//     Ok(Server {
-//         handles,
-//         request_queue,
-//         term_tx,
-//         init,
-//         session,
-//         group: url_group,
-//     })
-// }
