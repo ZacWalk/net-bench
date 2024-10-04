@@ -111,19 +111,18 @@ impl Server {
             }
         }
 
-        let rq = self.request_queue.clone(); // Clone the Option<Arc>
-        let term_tx = self.kill_tx.clone(); // Clone the Option<broadcast::Sender>
+        let rq = self.request_queue.clone();
+        let term_tx = self.kill_tx.clone();
 
         // Single background thread
         let handle = std::thread::spawn(move || {
-            // Check if term_tx and rq are Some before using them
             let mut kill_channel = term_tx
                 .as_ref()
                 .map(|tx| tx.subscribe())
                 .expect("Could not subscribe to kill channel");
             let rq = rq.as_ref();
-
             let rt = tokio::runtime::Runtime::new().unwrap();
+            
             rt.block_on(async move {
                 loop {
                     tokio::select! {

@@ -7,20 +7,21 @@ A network benchmarking utility that can run as:
 
 This was used to test the performance of the async http.sys wrapper in [httpsys.rs](src/httpsys.rs) under various conditions.
 
-## Usage: `net-bench.exe <MODE> [OPTIONS] [RECEIVE_URL] [SEND_URL] [PROXY_URL]`
+### Usage: 
+#### `test-httpsys.exe <MODE> [OPTIONS] [RECEIVE_URL] [SEND_URL] [PROXY_URL]`
 
-## Mode Commands
+### Mode Commands
 
 *   **server** `<RECEIVE_URL>`: Starts the HTTP server
 *   **client** `<SEND_URL> [PROXY_URL]`: Sends requests to the server and measures latency
 *   **test**: Starts this app as a server and measures latency
 
-## Arguments
+### Arguments
 
 *   `<RECEIVE_URL>`: The URL to receive requests on
 *   `<SEND_URL>`: The URL to forward requests to
 
-## Options
+### Options
 
 *   `-n, --no-validate-certs`: Don't Validate SSL certificates
 *   `-h, --help`: Print help
@@ -28,17 +29,17 @@ This was used to test the performance of the async http.sys wrapper in [httpsys.
 
 ## Examples
 
-* `net-bench test`
-* `net-bench c https://google.com/`  Client mode calling localhost
-* `net-bench c https://google.com/ http://localhost:8080`  Client mode calling localhost via a proxy
-* `net-bench s http://localhost:8080`  Server mode receiving on localhost
+* `test-httpsys test`
+* `test-httpsys c https://google.com/`  Client mode calling localhost
+* `test-httpsys c https://google.com/ http://localhost:8080`  Client mode calling localhost via a proxy
+* `test-httpsys s http://localhost:8080`  Server mode receiving on localhost
 
 The server listens on the [url]/test/. If the server was run with:
-`net-bench s http://localhost:8080`
+`test-httpsys s http://localhost:8080`
 it would handle requests on `http://localhost:8080/test`.
 
 In the example above, you need to test latency with:
-`net-bench c http://localhost:8080/test/`
+`test-httpsys c http://localhost:8080/test/`
 
 You can call the app directly from cargo as follows:
 ```ps
